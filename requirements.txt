@@ -3,3 +3,4 @@ squaternion
 attrs
 pybullet
 opencv-python
+simplejson
