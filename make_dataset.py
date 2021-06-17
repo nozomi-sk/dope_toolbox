@@ -32,9 +32,13 @@ class MakeDataset:
         print("found %d hdr files" % len(self._hdr_paths))
 
         self.models = {}
-        model_dirs = os.listdir(os.path.join(self._base_path, "models"))
+        models_path = os.path.join(self._base_path, "models")
+        model_dirs = os.listdir(models_path)
         for model_dir in model_dirs:
-            obj_paths = glob(os.path.join(self._base_path, "models", model_dir, "**/*.obj"))
+            sub_dir_path = os.path.join(models_path, model_dir)
+            if not os.path.isdir(sub_dir_path):
+                continue
+            obj_paths = glob(os.path.join(sub_dir_path, "**/*.obj"))
             if len(obj_paths) == 1:
                 print("found %s mesh" % model_dir)
                 self.models[model_dir] = obj_paths[0]
