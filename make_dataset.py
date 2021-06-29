@@ -18,27 +18,32 @@ from typing import Union, Optional
 class MakeDataset:
     _latest_img: Optional[Union[np.ndarray, bool]]
 
-    def __init__(self, root_path: str, objects_per_img: int = 20):
+    def __init__(self, root_path: str, objects_per_img: int = 20, preview=False, debug=False, overwrite=False):
         self._output_jpg = True
         self._root_path = root_path
         self._latest_img = None
         self._base_path = os.path.dirname(os.path.abspath(__file__))
         self._objects_per_img = objects_per_img
         self._spp = 50
-        self._width = 680
-        self._height = 480
+        self._width = 400
+        self._height = 400
         self._steps = 60
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
         print("found %d hdr files" % len(self._hdr_paths))
 
         self.models = {}
         models_path = os.path.join(self._base_path, "models")
+        enabled_models = [
+            # 'ycb_002_master_chef_can'
+        ]
         model_dirs = os.listdir(models_path)
+        if len(enabled_models) > 0:
+            model_dirs = [i for i in model_dirs if i in enabled_models]
         for model_dir in model_dirs:
             sub_dir_path = os.path.join(models_path, model_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
-            obj_paths = glob(os.path.join(sub_dir_path, "**/*.obj"))
+            obj_paths = glob(os.path.join(sub_dir_path, "**/textured.obj"))
             if len(obj_paths) == 1:
                 print("found %s mesh" % model_dir)
                 self.models[model_dir] = obj_paths[0]
@@ -56,6 +61,11 @@ class MakeDataset:
             'eye': (0, 0, 0.8)
         }
         self._pbt_client = None
+        self._continue_event = threading.Event()
+        self._continue_event.set()
+        self._enable_preview = preview
+        self._enable_debug = debug
+        self._overwrite = overwrite
 
     @staticmethod
     def make_location():
@@ -75,6 +85,15 @@ class MakeDataset:
         q = Quaternion.from_euler(*new_rot)
         return q.x, q.y, q.z, q.w
 
+    @staticmethod
+    def is_valid_json(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            return isinstance(data, dict)
+        except ValueError:
+            return False
+
     def _generate_one(self, output_path_without_ext: str):
         png_path = output_path_without_ext + ".png"
         json_path = output_path_without_ext + ".json"
@@ -83,7 +102,10 @@ class MakeDataset:
         else:
             img_path = png_path
 
-        if os.path.isfile(img_path) and os.path.isfile(json_path):
+        if os.path.isfile(img_path) and \
+                os.path.isfile(json_path) and \
+                self.is_valid_json(json_path) and \
+                self._overwrite is False:
             return
 
         nvisii.clear_all()
@@ -115,10 +137,23 @@ class MakeDataset:
             obj_name = obj.get_name()
             obj_model_map[obj_name] = obj_class_name
 
+            fps_mesh_path = os.path.join(os.path.dirname(obj_path), 'fps.ply')
+            fps_mesh = nvisii.mesh.create_from_file("%s_fps" % obj_name, fps_mesh_path)
+            fps_entity = nvisii.entity.create(
+                name="%s_fps" % obj_name,
+                mesh=fps_mesh,
+                transform=nvisii.transform.create("%s_fps" % obj_name),
+                material=nvisii.material.create("%s_fps" % obj_name)
+            )
+
             pose = self.make_location()
             obj.get_transform().set_position(pose)
             rot = self.make_rotation()
             obj.get_transform().set_rotation(rot)
+
+            fps_entity.get_transform().set_position(pose)
+            fps_entity.get_transform().set_rotation(rot)
+
             vertices = obj.get_mesh().get_vertices()
 
             obj_col_id = p.createCollisionShape(
@@ -138,7 +173,7 @@ class MakeDataset:
                 'nvi': obj_name
             })
 
-        self._run_step(pbt_obj_map)
+        self._run_physics_engine(pbt_obj_map)
 
         export_obj_names = []
         for _map in pbt_obj_map:
@@ -152,6 +187,13 @@ class MakeDataset:
                 with open(dimension_path, 'w+') as fp:
                     json.dump(dimensions_dict, fp, indent=4, sort_keys=True)
 
+        self._export_json(json_path, export_obj_names, obj_model_map)
+        print(json_path)
+
+        for _map in pbt_obj_map:
+            obj_name = _map['nvi']
+            nvisii.entity.remove(obj_name + "_fps")
+
         nvisii.render_to_file(
             width=self._width,
             height=self._height,
@@ -164,8 +206,6 @@ class MakeDataset:
             os.unlink(png_path)
 
         print(img_path)
-        self._export_json(json_path, export_obj_names, obj_model_map)
-        print(json_path)
         self._latest_img = cv2.imread(img_path)
 
     @staticmethod
@@ -193,7 +233,24 @@ class MakeDataset:
 
             points.append([p_image[0], p_image[1]])
             points_cam.append([p_cam[0], p_cam[1], p_cam[2]])
-        return points, points_cam
+
+        fps_points = []
+        for i in range(8):
+            trans = nvisii.transform.get(f"{obj_name}_fps_{i}")
+            mat_trans = trans.get_local_to_world_matrix()
+            pos_m = nvisii.vec4(
+                mat_trans[3][0],
+                mat_trans[3][1],
+                mat_trans[3][2],
+                1)
+            p_image = cam_proj_matrix * (cam_matrix * pos_m)
+            p_image = nvisii.vec2(p_image) / p_image.w
+            p_image = p_image * nvisii.vec2(1, -1)
+            p_image = (p_image + nvisii.vec2(1, 1)) * 0.5
+
+            fps_points.append([p_image[0], p_image[1]])
+
+        return points, points_cam, fps_points
 
     def _export_json(self, save_path, obj_names, obj_model_map, visibility_use_percentage=False):
         camera_entity = nvisii.entity.get("camera")
@@ -258,11 +315,14 @@ class MakeDataset:
         id_keys_map = nvisii.entity.get_name_to_id_map()
 
         for obj_name in obj_names:
-            projected_key_points, _ = self._get_cuboid_image_space(obj_name)
+            projected_key_points, _, fps_key_points = self._get_cuboid_image_space(obj_name)
 
             # put them in the image space.
-            for i_p, p in enumerate(projected_key_points):
-                projected_key_points[i_p] = [p[0] * self._width, p[1] * self._height]
+            for i_p, _p in enumerate(projected_key_points):
+                projected_key_points[i_p] = [_p[0] * self._width, _p[1] * self._height]
+
+            for i_p, _p in enumerate(fps_key_points):
+                fps_key_points[i_p] = [_p[0] * self._width, _p[1] * self._height]
 
             # Get the location and rotation of the object in the camera frame
 
@@ -349,10 +409,11 @@ class MakeDataset:
                     trans.get_rotation()[2],
                     trans.get_rotation()[3]
                 ],
-
                 'projected_cuboid': projected_key_points[0:8],
                 'projected_cuboid_centroid': projected_key_points[8],
-                'segmentation_id': id_keys_map[obj_name],
+                'projected_fps_points': fps_key_points,
+                # 'segmentation_id': id_keys_map[obj_name],
+                'segmentation_id': 0,
                 'visibility_image': visibility,
                 'bounding_box': {
                     'top_left': [
@@ -370,7 +431,7 @@ class MakeDataset:
             json.dump(dict_out, fp, indent=4, sort_keys=True)
         return dict_out
 
-    def _run_step(self, pbt_nvi_map):
+    def _run_physics_engine(self, pbt_nvi_map):
         for i in range(self._steps):
             p.stepSimulation()
 
@@ -379,6 +440,10 @@ class MakeDataset:
             entity = nvisii.entity.get(_map['nvi'])
             entity.get_transform().set_position(pos)
             entity.get_transform().set_rotation(rot)
+
+            fps_entity = nvisii.entity.get(_map['nvi'] + "_fps")
+            fps_entity.get_transform().set_position(pos)
+            fps_entity.get_transform().set_rotation(rot)
 
     @staticmethod
     def _add_cuboid(entity_name):
@@ -416,6 +481,15 @@ class MakeDataset:
             child_transform.set_scale(vec3(0.3))
             child_transform.set_parent(obj.get_transform())
 
+        fps_entity = nvisii.entity.get("%s_fps" % entity_name)
+        assert isinstance(fps_entity, nvisii.entity)
+        fps_vertices = fps_entity.get_mesh().get_vertices()
+        for fps_i, fps_vertex in enumerate(fps_vertices):
+            child_transform = nvisii.transform.create(f"{entity_name}_fps_{fps_i}")
+            child_transform.set_position(vec3(fps_vertex[0], fps_vertex[1], fps_vertex[2]))
+            # child_transform.set_scale(vec3(0.3))
+            child_transform.set_parent(obj.get_transform())
+
         for i_v, v in enumerate(cuboid2):
             cuboid2[i_v] = [v[0], v[1], v[2]]
 
@@ -425,16 +499,21 @@ class MakeDataset:
         while True:
             if isinstance(self._latest_img, np.ndarray):
                 cv2.imshow("preview", self._latest_img)
-                cv2.waitKey(20)
+                if self._enable_debug:
+                    self._continue_event.set()
+                    cv2.waitKey(0)
+                else:
+                    cv2.waitKey(20)
             elif self._latest_img is None:
                 time.sleep(0.1)
             else:
                 break
 
     def run(self, output_path, jobs):
-        # preview_thread = threading.Thread(target=self._preview)
-        # preview_thread.daemon = True
-        # preview_thread.start()
+        if self._enable_preview:
+            preview_thread = threading.Thread(target=self._preview)
+            preview_thread.daemon = True
+            preview_thread.start()
 
         if not os.path.isdir(output_path):
             raise ValueError("%s is not valid" % output_path)
@@ -447,7 +526,10 @@ class MakeDataset:
         try:
             # [start,end]
             for output_name in jobs:
+                self._continue_event.wait()
                 self._generate_one(os.path.join(output_path, output_name))
+                if self._enable_preview and self._enable_debug:
+                    self._continue_event.clear()
 
             time.sleep(1)
         except KeyboardInterrupt:
@@ -469,11 +551,14 @@ if __name__ == '__main__':
         parser.add_argument('--root', required=True, dest="root", type=str)
         parser.add_argument('--save', required=True, dest="save", type=str)
         parser.add_argument('--jobs', required=True, dest="jobs", type=str)
+        parser.add_argument('--preview', default=0, dest="preview", type=int)
+        parser.add_argument('--debug', default=0, dest="debug", type=int)
+        parser.add_argument('--overwrite', default=0, dest="overwrite", type=int)
 
         args, _ = parser.parse_known_args()
         jobs = list(filter(lambda x: len(x) > 0, map(lambda x: str(x).strip(), str(args.jobs).split(','))))
-
-        _m = MakeDataset(args.root, args.obj_per_img)
+        _m = MakeDataset(args.root, args.obj_per_img, preview=bool(args.preview), debug=bool(args.debug),
+                         overwrite=bool(args.overwrite))
         _m.run(args.save, jobs)
 
 
