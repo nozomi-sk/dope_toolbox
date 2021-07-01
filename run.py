@@ -18,7 +18,7 @@ def handle(executable, root_path, save_path, obj_per_img, jobs):
         print("%d request to run a new subprocess [%d/%d]" % (os.getpid(), done_job_count, total_job_count))
         subprocess.run((
             executable,
-            os.path.join(base_path, "make_dataset.py"),
+            os.path.join(base_path, "make_fix_dataset.py"),
             "--obj_per_img",
             str(obj_per_img),
             "--root",
