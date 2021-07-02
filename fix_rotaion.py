@@ -3,7 +3,6 @@ import os
 import random
 import time
 from glob import glob
-import threading
 import numpy as np
 import nvisii
 from numpy import deg2rad
@@ -13,7 +12,6 @@ from nvisii import vec3
 import simplejson as json
 import cv2
 from typing import Union, Optional
-from pyquaternion import Quaternion as pyq
 
 
 class FixRotation:
@@ -25,7 +23,7 @@ class FixRotation:
         self._width = 400
         self._height = 400
         self._steps = 60
-        self._objects_per_img = 20
+        self._objects_per_img = 10
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
         print("found %d hdr files" % len(self._hdr_paths))
 
@@ -42,7 +40,7 @@ class FixRotation:
         # http://learnwebgl.brown37.net/07_cameras/camera_introduction.html
         self._camera_look_at = {
             'at': (0, 0, 0),
-            'up': (0, 1, 1),
+            'up': (0, 1, 0),
             'eye': (0, 0, 0.8)
         }
         self._pbt_client = None
@@ -52,17 +50,17 @@ class FixRotation:
         return (
             random.uniform(-0.25, 0.25),
             random.uniform(-0.25, 0.25),
-            random.uniform(0.0, 0.3)
+            random.uniform(-0.25, 0.25),
         )
 
     @staticmethod
     def make_rotation():
         new_rot = (
-            random.uniform(-np.pi, np.pi),
-            random.uniform(-np.pi, np.pi),
-            random.uniform(-np.pi, np.pi),
+            random.uniform(0, 90),  # Roll
+            random.uniform(0, 90),  # Pitch
+            0  # Yaw
         )
-        q = Quaternion.from_euler(*new_rot)
+        q = Quaternion.from_euler(*new_rot, degrees=True)
         return q.x, q.y, q.z, q.w
 
     @staticmethod
@@ -93,16 +91,13 @@ class FixRotation:
         nvisii.set_dome_light_rotation(nvisii.angleAxis(deg2rad(random.random() * 720), vec3(0, 0, 1)))
 
         obj_model_map = {}
-        pbt_obj_map = []
-        for _ in range(self._objects_per_img):
+        while len(obj_model_map.keys()) < self._objects_per_img:
             obj_class_name = random.choice(list(self.models.keys()))
             obj_path = self.models[obj_class_name]
 
             scene = nvisii.import_scene(file_path=obj_path)
             obj = scene.entities[0]
             assert isinstance(obj, nvisii.entity)
-            obj_name = obj.get_name()
-            obj_model_map[obj_name] = obj_class_name
 
             pose = self.make_location()
             obj.get_transform().set_position(pose)
@@ -111,46 +106,84 @@ class FixRotation:
 
             vertices = obj.get_mesh().get_vertices()
 
-            obj_col_id = p.createCollisionShape(
+            pbt_object_id = p.createCollisionShape(
                 p.GEOM_MESH,
                 vertices=vertices,
             )
-
-            p.createMultiBody(
-                baseCollisionShapeIndex=obj_col_id,
+            body_id = p.createMultiBody(
+                baseCollisionShapeIndex=pbt_object_id,
                 basePosition=pose,
                 baseOrientation=rot,
                 baseMass=0.01
             )
+            obj_name = obj.get_name()
+            if not self._has_collision(body_id):
+                obj_model_map[obj_name] = obj_class_name
+            else:
+                nvisii.entity_remove(obj_name)
+                p.removeBody(body_id)
 
-            pbt_obj_map.append({
-                'pbt': obj_col_id,
-                'nvi': obj_name
-            })
-
-        self._run_physics_engine(pbt_obj_map)
+        export_obj_names = list(obj_model_map.keys())
+        for export_obj_name in export_obj_names:
+            self._add_cuboid(export_obj_name)
 
         ori_img_data = self.nvisii_to_cv()
         cv2.imshow("ori", ori_img_data)
-
-        def round_4(yaw_pitch_roll):
-            return tuple(map(lambda x: round(x, 4), yaw_pitch_roll))
-
-        for _map in pbt_obj_map:
-            entity = nvisii.entity.get(_map['nvi'])
-            trans = entity.get_transform()
-            q = self.nvi_q_to_pyq(trans.get_rotation())
-            yaw, pitch, roll = q.yaw_pitch_roll
-            trans.add_angle_axis(angle=0 - yaw, axis=nvisii.vec3(0, 0, 1))
-            print(round_4(q.yaw_pitch_roll), round_4(self.nvi_q_to_pyq(trans.get_rotation()).yaw_pitch_roll))
-
-        fix_img_data = self.nvisii_to_cv()
-        cv2.imshow("fix", fix_img_data)
+        point_img_data = ori_img_data.copy()
+        self.draw_points(export_obj_names, 'cuboid', point_img_data)
+        cv2.imshow("points", point_img_data)
         cv2.waitKey(0)
 
-    @staticmethod
-    def nvi_q_to_pyq(_nvi_quat):
-        return pyq(w=_nvi_quat.w, x=_nvi_quat.x, y=_nvi_quat.y, z=_nvi_quat.z)
+    def draw_points(self, obj_names, transform_name, image_mat):
+        def hex_to_rgb(hex_str):
+            h = hex_str.lstrip('#')
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))[::-1]
+
+        colors = [
+            '#524034',
+            '#518f14',
+            '#61e6f3',
+            '#89367b',
+            '#96d03d',
+            '#897a98',
+            '#07f79c',
+            '#5175a0',
+            '#e3d586'
+        ]
+        colors = list(map(lambda x: hex_to_rgb(x), colors))
+
+        for obj_name in obj_names:
+            projected_key_points, _ = self._get_cuboid_image_space(obj_name, transform_name)
+
+            points = []
+            # put them in the image space.
+            for i_p, _p in enumerate(projected_key_points):
+                x, y = _p[0] * self._width, _p[1] * self._height
+                points.append((round(x), round(y)))
+
+            def draw_line(_p1, _p2, color=(255, 255, 255)):
+                cv2.line(image_mat, _p1, _p2, color, thickness=1)
+
+            # draw front
+            draw_line(points[0], points[1], (0, 0, 255))
+            draw_line(points[1], points[2])
+            draw_line(points[3], points[2])
+            draw_line(points[3], points[0])
+
+            # draw back
+            draw_line(points[4], points[5], (0, 0, 255))
+            draw_line(points[6], points[5])
+            draw_line(points[6], points[7])
+            draw_line(points[4], points[7])
+
+            # draw sides
+            draw_line(points[0], points[4], (0, 0, 255))
+            draw_line(points[7], points[3])
+            draw_line(points[5], points[1], (0, 0, 255))
+            draw_line(points[2], points[6])
+
+            for i, point in enumerate(points[:8]):
+                cv2.circle(image_mat, point, 5, colors[i], thickness=-1)
 
     def nvisii_to_cv(self):
         fd, save_path = tempfile.mkstemp(prefix="lasr_dope_", suffix=".png")
@@ -166,14 +199,14 @@ class FixRotation:
         return img_data
 
     @staticmethod
-    def _get_cuboid_image_space(obj_name):
+    def _get_cuboid_image_space(obj_name, transform_name="cuboid"):
         cam_matrix = nvisii.entity.get('camera').get_transform().get_world_to_local_matrix()
         cam_proj_matrix = nvisii.entity.get('camera').get_camera().get_projection()
 
         points = []
         points_cam = []
         for i_t in range(9):
-            trans = nvisii.transform.get(f"{obj_name}_cuboid_{i_t}")
+            trans = nvisii.transform.get(f"{obj_name}_{transform_name}_{i_t}")
             mat_trans = trans.get_local_to_world_matrix()
             pos_m = nvisii.vec4(
                 mat_trans[3][0],
@@ -368,18 +401,19 @@ class FixRotation:
             json.dump(dict_out, fp, indent=4, sort_keys=True)
         return dict_out
 
-    def _run_physics_engine(self, pbt_nvi_map):
-        for i in range(self._steps):
-            p.stepSimulation()
-
-        for _map in pbt_nvi_map:
-            pos, rot = p.getBasePositionAndOrientation(_map['pbt'])
-            entity = nvisii.entity.get(_map['nvi'])
-            entity.get_transform().set_position(pos)
-            entity.get_transform().set_rotation(rot)
+    @staticmethod
+    def _has_collision(body_id):
+        p.stepSimulation()
+        contact_points = p.getContactPoints(bodyA=body_id)
+        return len(contact_points) > 0
+        # for _map in pbt_nvi_map:
+        #     pos, rot = p.getBasePositionAndOrientation(_map['pbt'])
+        #     entity = nvisii.entity.get(_map['nvi'])
+        #     entity.get_transform().set_position(pos)
+        #     entity.get_transform().set_rotation(rot)
 
     @staticmethod
-    def _add_cuboid(entity_name):
+    def _add_cuboid(entity_name, transform_name="cuboid"):
         obj = nvisii.entity.get(entity_name)
         min_obj = obj.get_mesh().get_min_aabb_corner()
         max_obj = obj.get_mesh().get_max_aabb_corner()
@@ -409,7 +443,7 @@ class FixRotation:
         ]
 
         for i_p, p in enumerate(cuboid2):
-            child_transform = nvisii.transform.create(f"{entity_name}_cuboid_{i_p}")
+            child_transform = nvisii.transform.create(f"{entity_name}_{transform_name}_{i_p}")
             child_transform.set_position(p)
             child_transform.set_scale(vec3(0.3))
             child_transform.set_parent(obj.get_transform())
@@ -423,7 +457,7 @@ class FixRotation:
         nvisii.initialize(headless=True)
         nvisii.enable_denoiser()
         self._pbt_client = p.connect(p.DIRECT)
-        p.setGravity(0, 0, -10)
+        p.setGravity(0, 0, 0)
 
         try:
             while True:
