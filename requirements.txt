@@ -4,4 +4,3 @@ attrs
 pybullet
 opencv-python
 simplejson
-pyquaternion
