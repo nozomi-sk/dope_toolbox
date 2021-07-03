@@ -12,23 +12,35 @@ from nvisii import vec3
 import simplejson as json
 import cv2
 from typing import Union, Optional, Dict, Tuple
-from pyquaternion import Quaternion as Pyq
 
 
 class MakeDataset:
-    _model_max_angles: Dict[str, Tuple[Optional[int], Optional[int], Optional[int]]]
-    _latest_img: Optional[Union[np.ndarray, bool]]
+    _model_rotations: Dict[str, Optional[
+        Tuple[Union[float, Tuple[int, int]], Union[float, Tuple[int, int]], Union[float, Tuple[int, int]]]]]
+    _preview_img: Optional[Union[np.ndarray, bool]]
 
     def __init__(self, root_path: str, objects_per_img: int = 20, preview=False, debug=False, overwrite=False):
+        colors = [
+            '#524034',
+            '#518f14',
+            '#61e6f3',
+            '#89367b',
+            '#96d03d',
+            '#897a98',
+            '#07f79c',
+            '#5175a0',
+            '#e3d586'
+        ]
+        self._colors = list(map(lambda x: self._hex_to_rgb(x), colors))
         self._output_jpg = True
         self._root_path = root_path
-        self._latest_img = None
+        self._preview_img = None
         self._base_path = os.path.dirname(os.path.abspath(__file__))
         self._objects_per_img = objects_per_img
-        self._spp = 150
+        self._objs_vertices = {}
+        self._spp = 200
         self._width = 400
         self._height = 400
-        self._steps = 60
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
         print("found %d hdr files" % len(self._hdr_paths))
 
@@ -38,9 +50,10 @@ class MakeDataset:
             'ycb_002_master_chef_can',
             'ycb_004_sugar_box'
         ]
-        self._model_max_angles = {
-            # yaw, pitch, roll
-            "ycb_002_master_chef_can": (0, None, None)
+        self._model_rotations = {
+            # roll, pitch, yaw (in degrees)
+            "ycb_002_master_chef_can": ((0, 90), (0, 90), 0),
+            "ycb_004_sugar_box": ((0, 90), (0, 90), (0, 90)),
         }
         model_dirs = os.listdir(models_path)
         if len(enabled_models) > 0:
@@ -61,9 +74,10 @@ class MakeDataset:
         if len(self.models) == 0:
             raise RuntimeError("no available models found")
 
+        # http://learnwebgl.brown37.net/07_cameras/camera_introduction.html
         self._camera_look_at = {
             'at': (0, 0, 0),
-            'up': (0, 1, 1),
+            'up': (0, 1, 0),
             'eye': (0, 0, 0.8)
         }
         self._pbt_client = None
@@ -74,31 +88,45 @@ class MakeDataset:
         self._overwrite = overwrite
 
     @staticmethod
+    def _hex_to_rgb(hex_str):
+        h = hex_str.lstrip('#')
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))[::-1]
+
+    @staticmethod
     def make_location():
         return (
             random.uniform(-0.25, 0.25),
             random.uniform(-0.25, 0.25),
-            random.uniform(0.0, 0.3)
+            random.uniform(-0.25, 0.25),
         )
-
-    @staticmethod
-    def make_rotation():
-        new_rot = (
-            random.uniform(-np.pi, np.pi),
-            random.uniform(-np.pi, np.pi),
-            random.uniform(-np.pi, np.pi),
-        )
-        q = Quaternion.from_euler(*new_rot)
-        return q.x, q.y, q.z, q.w
 
     @staticmethod
     def is_valid_json(json_path):
+        if not os.path.isfile(json_path):
+            return False
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
             return isinstance(data, dict)
         except ValueError:
             return False
+
+    def is_valid_image(self, img_path):
+        if not os.path.isfile(img_path):
+            return False
+        img_mat = cv2.imread(img_path)
+        if not isinstance(img_mat, np.ndarray):
+            return False
+        return img_mat.shape == (self._height, self._width, 3)
+
+    def _cache_vertices(self):
+        for obj_class_name, obj_path in self.models.items():
+            nvisii.clear_all()
+            scene = nvisii.import_scene(file_path=obj_path)
+            obj = scene.entities[0]
+            assert isinstance(obj, nvisii.entity)
+            self._objs_vertices[obj_class_name] = obj.get_mesh().get_vertices()
+        nvisii.clear_all()
 
     def _generate_one(self, output_path_without_ext: str):
         png_path = output_path_without_ext + ".png"
@@ -108,10 +136,7 @@ class MakeDataset:
         else:
             img_path = png_path
 
-        if os.path.isfile(img_path) and \
-                os.path.isfile(json_path) and \
-                self.is_valid_json(json_path) and \
-                self._overwrite is False:
+        if self.is_valid_json(json_path) and self.is_valid_image(img_path) and self._overwrite is False:
             return
 
         nvisii.clear_all()
@@ -132,86 +157,61 @@ class MakeDataset:
         nvisii.set_dome_light_rotation(nvisii.angleAxis(deg2rad(random.random() * 720), vec3(0, 0, 1)))
 
         obj_model_map = {}
-        pbt_obj_map = []
         for _ in range(self._objects_per_img):
             obj_class_name = random.choice(list(self.models.keys()))
             obj_path = self.models[obj_class_name]
 
-            scene = nvisii.import_scene(file_path=obj_path)
-            obj = scene.entities[0]
-            assert isinstance(obj, nvisii.entity)
-            obj_name = obj.get_name()
-            obj_model_map[obj_name] = obj_class_name
-
             pose = self.make_location()
-            obj.get_transform().set_position(pose)
-            rot = self.make_rotation()
-            obj.get_transform().set_rotation(rot)
+            if obj_class_name not in self._model_rotations or self._model_rotations[obj_class_name] is None:
+                new_rot = (
+                    random.uniform(-np.pi, np.pi),
+                    random.uniform(-np.pi, np.pi),
+                    random.uniform(-np.pi, np.pi),
+                )
+            else:
+                model_rotation = self._model_rotations[obj_class_name]
+                assert len(model_rotation) == 3
+                new_rot = []
+                for axis_rotation in model_rotation:
+                    if isinstance(axis_rotation, tuple):
+                        assert len(axis_rotation) == 2
+                        new_rot.append(random.uniform(*axis_rotation))
+                    else:
+                        new_rot.append(float(axis_rotation))
+            q = Quaternion.from_euler(*new_rot, degrees=True)
+            rot = q.x, q.y, q.z, q.w
 
-            vertices = obj.get_mesh().get_vertices()
-
-            obj_col_id = p.createCollisionShape(
+            vertices = self._objs_vertices[obj_class_name]
+            pbt_object_id = p.createCollisionShape(
                 p.GEOM_MESH,
                 vertices=vertices,
             )
-
-            p.createMultiBody(
-                baseCollisionShapeIndex=obj_col_id,
+            body_id = p.createMultiBody(
+                baseCollisionShapeIndex=pbt_object_id,
                 basePosition=pose,
                 baseOrientation=rot,
                 baseMass=0.01
             )
 
-            pbt_obj_map.append({
-                'pbt': obj_col_id,
-                'nvi': obj_name
-            })
+            if not self._has_collision(body_id):
+                scene = nvisii.import_scene(file_path=obj_path)
+                obj = scene.entities[0]
+                assert isinstance(obj, nvisii.entity)
+                obj.get_transform().set_position(pose)
+                obj.get_transform().set_rotation(rot)
+                obj_name = obj.get_name()
+                obj_model_map[obj_name] = obj_class_name
+            else:
+                p.removeBody(body_id)
 
-        self._run_physics_engine(pbt_obj_map)
-
-        def round_4(yaw_pitch_roll):
-            return tuple(map(lambda x: round(x, 4), yaw_pitch_roll))
-
-        axes = [
-            nvisii.vec3(0, 0, 1),
-            nvisii.vec3(0, 1, 0),
-            nvisii.vec3(1, 0, 0)
-        ]
-        for _map in pbt_obj_map:
-            object_name = _map['nvi']
-            model_name = obj_model_map[object_name]
-            if model_name in self._model_max_angles:
-                max_angles = self._model_max_angles[model_name]
-                entity = nvisii.entity.get(object_name)
-                trans = entity.get_transform()
-                q = self.nvi_q_to_pyq(trans.get_rotation())
-                angles = q.yaw_pitch_roll
-                for index, max_angle in enumerate(max_angles):
-                    current_angle = angles[index]
-                    axis = axes[index]
-                    if max_angle is not None:
-                        trans.add_angle_axis(angle=max_angle - current_angle, axis=axis)
-
-                new_angles = self.nvi_q_to_pyq(trans.get_rotation()).yaw_pitch_roll
-                for index, max_angle in enumerate(max_angles):
-                    current_angle = new_angles[index]
-                    if max_angle is not None:
-                        assert abs(max_angle - current_angle) < 0.01
-
-        export_obj_names = []
-        for _map in pbt_obj_map:
-            obj_name = _map['nvi']
-            export_obj_names.append(obj_name)
-            _, dimensions_dict = self._add_cuboid(obj_name)
-
-            model_name = obj_model_map[obj_name]
+        export_obj_names = list(obj_model_map.keys())
+        for export_obj_name in export_obj_names:
+            _, dimensions_dict = self._add_cuboid(export_obj_name)
+            model_name = obj_model_map[export_obj_name]
             dimension_path = os.path.join(self._root_path, model_name + ".json")
             if not os.path.isfile(dimension_path):
                 with open(dimension_path, 'w+') as fp:
                     json.dump(dimensions_dict, fp, indent=4, sort_keys=True)
-
-        self._export_json(json_path, export_obj_names, obj_model_map)
-        print(json_path)
 
         nvisii.render_to_file(
             width=self._width,
@@ -219,17 +219,17 @@ class MakeDataset:
             samples_per_pixel=self._spp,
             file_path=png_path
         )
+        image = cv2.imread(png_path)
+        preview_img = image.copy()
+        self._export_json(json_path, export_obj_names, obj_model_map, preview_img)
+        print(json_path)
         if img_path != png_path:
-            image = cv2.imread(png_path)
             cv2.imwrite(img_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             os.unlink(png_path)
 
         print(img_path)
-        self._latest_img = cv2.imread(img_path)
-
-    @staticmethod
-    def nvi_q_to_pyq(_nvi_q):
-        return Pyq(w=_nvi_q.w, x=_nvi_q.x, y=_nvi_q.y, z=_nvi_q.z)
+        preview_img = np.concatenate((image, preview_img), axis=1)
+        self._preview_img = preview_img
 
     @staticmethod
     def _get_cuboid_image_space(obj_name):
@@ -259,7 +259,7 @@ class MakeDataset:
 
         return points, points_cam
 
-    def _export_json(self, save_path, obj_names, obj_model_map, visibility_use_percentage=False):
+    def _export_json(self, save_path, obj_names, obj_model_map, preview_img, visibility_use_percentage=False):
         camera_entity = nvisii.entity.get("camera")
         camera_trans = camera_entity.get_transform()
         # assume we only use the view camera
@@ -323,13 +323,15 @@ class MakeDataset:
 
         for obj_name in obj_names:
             projected_key_points, _ = self._get_cuboid_image_space(obj_name)
-
+            cv_points = []
             # put them in the image space.
             for i_p, _p in enumerate(projected_key_points):
                 projected_key_points[i_p] = [_p[0] * self._width, _p[1] * self._height]
+                cv_points.append(tuple(map(round, projected_key_points[i_p])))
+
+            self._draw(cv_points, preview_img)
 
             # Get the location and rotation of the object in the camera frame
-
             trans = nvisii.entity.get(obj_name).get_transform()
             quaternion_xyzw = nvisii.inverse(cam_world_quaternion) * trans.get_rotation()
 
@@ -434,15 +436,33 @@ class MakeDataset:
             json.dump(dict_out, fp, indent=4, sort_keys=True)
         return dict_out
 
-    def _run_physics_engine(self, pbt_nvi_map):
-        for i in range(self._steps):
-            p.stepSimulation()
+    def _draw(self, cv_points, preview_img):
+        def draw_line(_p1, _p2, color=(255, 255, 255)):
+            cv2.line(preview_img, _p1, _p2, color, thickness=1)
 
-        for _map in pbt_nvi_map:
-            pos, rot = p.getBasePositionAndOrientation(_map['pbt'])
-            entity = nvisii.entity.get(_map['nvi'])
-            entity.get_transform().set_position(pos)
-            entity.get_transform().set_rotation(rot)
+        # draw front
+        draw_line(cv_points[0], cv_points[1], (0, 0, 255))
+        draw_line(cv_points[1], cv_points[2])
+        draw_line(cv_points[3], cv_points[2])
+        draw_line(cv_points[3], cv_points[0])
+        # draw back
+        draw_line(cv_points[4], cv_points[5], (0, 0, 255))
+        draw_line(cv_points[6], cv_points[5])
+        draw_line(cv_points[6], cv_points[7])
+        draw_line(cv_points[4], cv_points[7])
+        # draw sides
+        draw_line(cv_points[0], cv_points[4], (0, 0, 255))
+        draw_line(cv_points[7], cv_points[3])
+        draw_line(cv_points[5], cv_points[1], (0, 0, 255))
+        draw_line(cv_points[2], cv_points[6])
+        for i, cv_point in enumerate(cv_points[:8]):
+            cv2.circle(preview_img, cv_point, 5, self._colors[i], thickness=-1)
+
+    @staticmethod
+    def _has_collision(body_id):
+        p.stepSimulation()
+        contact_points = p.getContactPoints(bodyA=body_id)
+        return len(contact_points) > 0
 
     @staticmethod
     def _add_cuboid(entity_name):
@@ -487,14 +507,14 @@ class MakeDataset:
 
     def _preview(self):
         while True:
-            if isinstance(self._latest_img, np.ndarray):
-                cv2.imshow("preview", self._latest_img)
+            if isinstance(self._preview_img, np.ndarray):
+                cv2.imshow("preview", self._preview_img)
                 if self._enable_debug:
                     self._continue_event.set()
                     cv2.waitKey(0)
                 else:
                     cv2.waitKey(20)
-            elif self._latest_img is None:
+            elif self._preview_img is None:
                 time.sleep(0.1)
             else:
                 break
@@ -512,6 +532,7 @@ class MakeDataset:
         nvisii.enable_denoiser()
         self._pbt_client = p.connect(p.DIRECT)
         p.setGravity(0, 0, -10)
+        self._cache_vertices()
 
         try:
             # [start,end]
@@ -525,11 +546,10 @@ class MakeDataset:
         except KeyboardInterrupt:
             pass
 
-        self._latest_img = False
+        self._preview_img = False
 
         p.disconnect()
         cv2.destroyAllWindows()
-        # let's clean up GPU resources
         nvisii.deinitialize()
 
 

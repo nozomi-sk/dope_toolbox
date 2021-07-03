@@ -23,7 +23,8 @@ class FixRotation:
         self._width = 400
         self._height = 400
         self._steps = 60
-        self._objects_per_img = 10
+        self._objects_per_img = 15
+        self._objs_vertices = {}
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
         print("found %d hdr files" % len(self._hdr_paths))
 
@@ -72,6 +73,17 @@ class FixRotation:
         except ValueError:
             return False
 
+    def _cache_vertices(self):
+        start_time = time.time()
+        for obj_class_name, obj_path in self.models.items():
+            nvisii.clear_all()
+            scene = nvisii.import_scene(file_path=obj_path)
+            obj = scene.entities[0]
+            assert isinstance(obj, nvisii.entity)
+            self._objs_vertices[obj_class_name] = obj.get_mesh().get_vertices()
+        nvisii.clear_all()
+        print("cache time: %.4f" % (time.time() - start_time))
+
     def _generate_one(self):
         nvisii.clear_all()
         p.resetSimulation()
@@ -90,22 +102,17 @@ class FixRotation:
         nvisii.set_dome_light_texture(dome)
         nvisii.set_dome_light_rotation(nvisii.angleAxis(deg2rad(random.random() * 720), vec3(0, 0, 1)))
 
+        start_time = time.time()
         obj_model_map = {}
+        tries = 0
+
         while len(obj_model_map.keys()) < self._objects_per_img:
+            tries += 1
             obj_class_name = random.choice(list(self.models.keys()))
             obj_path = self.models[obj_class_name]
-
-            scene = nvisii.import_scene(file_path=obj_path)
-            obj = scene.entities[0]
-            assert isinstance(obj, nvisii.entity)
-
             pose = self.make_location()
-            obj.get_transform().set_position(pose)
             rot = self.make_rotation()
-            obj.get_transform().set_rotation(rot)
-
-            vertices = obj.get_mesh().get_vertices()
-
+            vertices = self._objs_vertices[obj_class_name]
             pbt_object_id = p.createCollisionShape(
                 p.GEOM_MESH,
                 vertices=vertices,
@@ -116,18 +123,25 @@ class FixRotation:
                 baseOrientation=rot,
                 baseMass=0.01
             )
-            obj_name = obj.get_name()
             if not self._has_collision(body_id):
+                scene = nvisii.import_scene(file_path=obj_path)
+                obj = scene.entities[0]
+                assert isinstance(obj, nvisii.entity)
+                obj.get_transform().set_position(pose)
+                obj.get_transform().set_rotation(rot)
+                obj_name = obj.get_name()
                 obj_model_map[obj_name] = obj_class_name
             else:
-                nvisii.entity_remove(obj_name)
                 p.removeBody(body_id)
 
+        print("tries: %d, time: %.4f" % (tries, (time.time() - start_time)))
         export_obj_names = list(obj_model_map.keys())
         for export_obj_name in export_obj_names:
             self._add_cuboid(export_obj_name)
 
         ori_img_data = self.nvisii_to_cv()
+        assert isinstance(ori_img_data, np.ndarray)
+        print(ori_img_data.shape)
         cv2.imshow("ori", ori_img_data)
         point_img_data = ori_img_data.copy()
         self.draw_points(export_obj_names, 'cuboid', point_img_data)
@@ -458,7 +472,7 @@ class FixRotation:
         nvisii.enable_denoiser()
         self._pbt_client = p.connect(p.DIRECT)
         p.setGravity(0, 0, 0)
-
+        self._cache_vertices()
         try:
             while True:
                 self._generate_one()
