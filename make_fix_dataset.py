@@ -3,6 +3,8 @@ import random
 import time
 from glob import glob
 import threading
+
+import numpy
 import numpy as np
 import nvisii
 from numpy import deg2rad
@@ -11,7 +13,7 @@ import pybullet as p
 from nvisii import vec3
 import simplejson as json
 import cv2
-from typing import Union, Optional, Dict, Tuple
+from typing import Union, Optional, Dict, Tuple, Sequence
 
 
 class MakeDataset:
@@ -19,7 +21,10 @@ class MakeDataset:
         Tuple[Union[float, Tuple[int, int]], Union[float, Tuple[int, int]], Union[float, Tuple[int, int]]]]]
     _preview_img: Optional[Union[np.ndarray, bool]]
 
-    def __init__(self, root_path: str, objects_per_img: int = 20, preview=False, debug=False, overwrite=False):
+    def __init__(self, root_path: str, objects_per_img: int = 20,
+                 enabled_model_keywords: Optional[Sequence[str]] = None,
+                 preview=False, debug=False,
+                 overwrite=False):
         colors = [
             '#524034',
             '#518f14',
@@ -42,42 +47,50 @@ class MakeDataset:
         self._width = 400
         self._height = 400
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
+        self._max_objects_per_class = 3
         print("found %d hdr files" % len(self._hdr_paths))
 
         self.models = {}
         models_path = os.path.join(self._base_path, "models")
-        enabled_models = [
-            'ycb_002_master_chef_can',
-            'ycb_004_sugar_box'
-        ]
         self._model_rotations = {
             # roll, pitch, yaw (in degrees)
             "ycb_002_master_chef_can": ((0, 90), (0, 90), 0),
             "ycb_004_sugar_box": ((0, 90), (0, 90), (0, 90)),
         }
         model_dirs = os.listdir(models_path)
-        if len(enabled_models) > 0:
-            model_dirs = [i for i in model_dirs if i in enabled_models]
+        if enabled_model_keywords is not None and len(enabled_model_keywords) > 0:
+            def is_enabled_model(_model_dir):
+                for enabled_keyword in enabled_model_keywords:
+                    if enabled_keyword in _model_dir:
+                        return True
+                return False
+
+            model_dirs = list(filter(lambda x: is_enabled_model(x), model_dirs))
         for model_dir in model_dirs:
             sub_dir_path = os.path.join(models_path, model_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
             obj_paths = glob(os.path.join(sub_dir_path, "**/textured_fix.obj"))
             if len(obj_paths) == 1:
-                print("found %s mesh" % model_dir)
+                print("found %s" % model_dir)
                 self.models[model_dir] = obj_paths[0]
-            elif len(obj_paths) > 1:
-                print("%s has multiple obj mesh files, ignore" % model_dir)
-            else:
-                print("%s has no obj mesh files, ignore" % model_dir)
 
         if len(self.models) == 0:
             raise RuntimeError("no available models found")
 
+        self._objects_per_img = min(self._objects_per_img, self._max_objects_per_class * len(self.models.keys()))
+
         # http://learnwebgl.brown37.net/07_cameras/camera_introduction.html
+        """
+         from the point of view of viewing the front of the object from the outside, 
+         the X axis points left, 
+         the Y axis points down, 
+         and the Z axis points out of the page toward the viewer
+          (right-hand coordinate system).
+        """
         self._camera_look_at = {
             'at': (0, 0, 0),
-            'up': (0, 1, 0),
+            'up': (0, -1, 0),
             'eye': (0, 0, 0.8)
         }
         self._pbt_client = None
@@ -157,8 +170,17 @@ class MakeDataset:
         nvisii.set_dome_light_rotation(nvisii.angleAxis(deg2rad(random.random() * 720), vec3(0, 0, 1)))
 
         obj_model_map = {}
-        for _ in range(self._objects_per_img):
-            obj_class_name = random.choice(list(self.models.keys()))
+        obj_class_count = numpy.zeros((len(self.models.keys()),), dtype=int)
+        model_keys = list(self.models.keys())
+        while len(obj_model_map.keys()) < self._objects_per_img:
+            available_result = np.where(obj_class_count < self._max_objects_per_class)[0]
+            assert isinstance(available_result, np.ndarray)
+            available_indexes = available_result.tolist()
+            assert isinstance(available_indexes, list)
+            if len(available_indexes) == 0:
+                break
+            picked_class_index = random.choice(available_indexes)
+            obj_class_name = model_keys[picked_class_index]
             obj_path = self.models[obj_class_name]
 
             pose = self.make_location()
@@ -201,6 +223,7 @@ class MakeDataset:
                 obj.get_transform().set_rotation(rot)
                 obj_name = obj.get_name()
                 obj_model_map[obj_name] = obj_class_name
+                obj_class_count[picked_class_index] += 1
             else:
                 p.removeBody(body_id)
 
@@ -442,19 +465,24 @@ class MakeDataset:
 
         # draw front
         draw_line(cv_points[0], cv_points[1], (0, 0, 255))
-        draw_line(cv_points[1], cv_points[2])
-        draw_line(cv_points[3], cv_points[2])
-        draw_line(cv_points[3], cv_points[0])
+        draw_line(cv_points[1], cv_points[2], (0, 0, 255))
+        draw_line(cv_points[2], cv_points[3], (0, 0, 255))
+        draw_line(cv_points[3], cv_points[0], (0, 0, 255))
+        draw_line(cv_points[0], cv_points[2], (0, 0, 255))
+        draw_line(cv_points[1], cv_points[3], (0, 0, 255))
+
         # draw back
-        draw_line(cv_points[4], cv_points[5], (0, 0, 255))
-        draw_line(cv_points[6], cv_points[5])
+        draw_line(cv_points[4], cv_points[5])
+        draw_line(cv_points[5], cv_points[6])
         draw_line(cv_points[6], cv_points[7])
-        draw_line(cv_points[4], cv_points[7])
+        draw_line(cv_points[7], cv_points[4])
+
         # draw sides
-        draw_line(cv_points[0], cv_points[4], (0, 0, 255))
-        draw_line(cv_points[7], cv_points[3])
-        draw_line(cv_points[5], cv_points[1], (0, 0, 255))
+        draw_line(cv_points[1], cv_points[5])
         draw_line(cv_points[2], cv_points[6])
+        draw_line(cv_points[0], cv_points[4])
+        draw_line(cv_points[3], cv_points[7])
+
         for i, cv_point in enumerate(cv_points[:8]):
             cv2.circle(preview_img, cv_point, 5, self._colors[i], thickness=-1)
 
@@ -471,11 +499,11 @@ class MakeDataset:
         max_obj = obj.get_mesh().get_max_aabb_corner()
         centroid_obj = obj.get_mesh().get_aabb_center()
         dimensions_dict = {
-            'width': max_obj[0] - min_obj[0],
-            'height': max_obj[1] - min_obj[1],
-            'length': max_obj[2] - min_obj[2]
+            'x': max_obj[0] - min_obj[0],
+            'y': max_obj[1] - min_obj[1],
+            'z': max_obj[2] - min_obj[2]
         }
-        cuboid1 = [
+        cuboid = [
             vec3(max_obj[0], max_obj[1], max_obj[2]),
             vec3(min_obj[0], max_obj[1], max_obj[2]),
             vec3(max_obj[0], min_obj[1], max_obj[2]),
@@ -486,24 +514,37 @@ class MakeDataset:
             vec3(min_obj[0], min_obj[1], min_obj[2]),
             vec3(centroid_obj[0], centroid_obj[1], centroid_obj[2]),
         ]
-
-        cuboid2 = [
-            cuboid1[2], cuboid1[0], cuboid1[3],
-            cuboid1[5], cuboid1[4], cuboid1[1],
-            cuboid1[6], cuboid1[7], cuboid1[-1],
+        """
+              4 +-----------------+ 5
+               /     TOP         /|
+              /                 / |
+           0 +-----------------+ 1|
+             |      FRONT      |  |
+             |                 |  |
+             |  x <--+         |  |
+             |       |         |  |
+             |       v         |  + 6
+             |        y        | /
+             |                 |/
+           3 +-----------------+ 2
+        """
+        export_cuboid = [
+            cuboid[2], cuboid[4], cuboid[1],
+            cuboid[0], cuboid[5], cuboid[7],
+            cuboid[6], cuboid[3], cuboid[-1],
             vec3(centroid_obj[0], centroid_obj[1], centroid_obj[2])
         ]
 
-        for i_p, p in enumerate(cuboid2):
+        for i_p, _p in enumerate(export_cuboid):
             child_transform = nvisii.transform.create(f"{entity_name}_cuboid_{i_p}")
-            child_transform.set_position(p)
+            child_transform.set_position(_p)
             child_transform.set_scale(vec3(0.3))
             child_transform.set_parent(obj.get_transform())
 
-        for i_v, v in enumerate(cuboid2):
-            cuboid2[i_v] = [v[0], v[1], v[2]]
+        for i_v, v in enumerate(export_cuboid):
+            export_cuboid[i_v] = [v[0], v[1], v[2]]
 
-        return cuboid2, dimensions_dict
+        return export_cuboid, dimensions_dict
 
     def _preview(self):
         while True:
@@ -564,11 +605,24 @@ if __name__ == '__main__':
         parser.add_argument('--preview', default=0, dest="preview", type=int)
         parser.add_argument('--debug', default=0, dest="debug", type=int)
         parser.add_argument('--overwrite', default=0, dest="overwrite", type=int)
+        parser.add_argument('--models', default="", dest="models", type=str)
 
         args, _ = parser.parse_known_args()
         jobs = list(filter(lambda x: len(x) > 0, map(lambda x: str(x).strip(), str(args.jobs).split(','))))
-        _m = MakeDataset(args.root, args.obj_per_img, preview=bool(args.preview), debug=bool(args.debug),
-                         overwrite=bool(args.overwrite))
+
+        def trim(string):
+            return str(string).strip()
+
+        enabled_keywords = list(filter(lambda x: len(x) > 0, map(trim, args.models.split(','))))
+
+        _m = MakeDataset(
+            args.root,
+            args.obj_per_img,
+            enabled_model_keywords=enabled_keywords,
+            preview=bool(args.preview),
+            debug=bool(args.debug),
+            overwrite=bool(args.overwrite)
+        )
         _m.run(args.save, jobs)
 
 
