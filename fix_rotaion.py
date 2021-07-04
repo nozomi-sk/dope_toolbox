@@ -23,7 +23,7 @@ class FixRotation:
         self._width = 400
         self._height = 400
         self._steps = 60
-        self._objects_per_img = 15
+        self._objects_per_img = 3
         self._objs_vertices = {}
         self._hdr_paths = glob(os.path.join(self._base_path, "hdr", "*.hdr"))
         print("found %d hdr files" % len(self._hdr_paths))
@@ -41,7 +41,7 @@ class FixRotation:
         # http://learnwebgl.brown37.net/07_cameras/camera_introduction.html
         self._camera_look_at = {
             'at': (0, 0, 0),
-            'up': (0, 1, 0),
+            'up': (0, -1, 0),
             'eye': (0, 0, 0.8)
         }
         self._pbt_client = None
@@ -137,7 +137,8 @@ class FixRotation:
         print("tries: %d, time: %.4f" % (tries, (time.time() - start_time)))
         export_obj_names = list(obj_model_map.keys())
         for export_obj_name in export_obj_names:
-            self._add_cuboid(export_obj_name)
+            _, dimensions_dict = self._add_cuboid(export_obj_name)
+            print(obj_model_map[export_obj_name], dimensions_dict)
 
         ori_img_data = self.nvisii_to_cv()
         assert isinstance(ori_img_data, np.ndarray)
@@ -180,21 +181,23 @@ class FixRotation:
 
             # draw front
             draw_line(points[0], points[1], (0, 0, 255))
-            draw_line(points[1], points[2])
-            draw_line(points[3], points[2])
-            draw_line(points[3], points[0])
+            draw_line(points[1], points[2], (0, 0, 255))
+            draw_line(points[2], points[3], (0, 0, 255))
+            draw_line(points[3], points[0], (0, 0, 255))
+            draw_line(points[0], points[2], (0, 0, 255))
+            draw_line(points[1], points[3], (0, 0, 255))
 
             # draw back
-            draw_line(points[4], points[5], (0, 0, 255))
-            draw_line(points[6], points[5])
+            draw_line(points[4], points[5])
+            draw_line(points[5], points[6])
             draw_line(points[6], points[7])
-            draw_line(points[4], points[7])
+            draw_line(points[7], points[4])
 
             # draw sides
-            draw_line(points[0], points[4], (0, 0, 255))
-            draw_line(points[7], points[3])
-            draw_line(points[5], points[1], (0, 0, 255))
+            draw_line(points[1], points[5])
             draw_line(points[2], points[6])
+            draw_line(points[0], points[4])
+            draw_line(points[3], points[7])
 
             for i, point in enumerate(points[:8]):
                 cv2.circle(image_mat, point, 5, colors[i], thickness=-1)
@@ -420,11 +423,6 @@ class FixRotation:
         p.stepSimulation()
         contact_points = p.getContactPoints(bodyA=body_id)
         return len(contact_points) > 0
-        # for _map in pbt_nvi_map:
-        #     pos, rot = p.getBasePositionAndOrientation(_map['pbt'])
-        #     entity = nvisii.entity.get(_map['nvi'])
-        #     entity.get_transform().set_position(pos)
-        #     entity.get_transform().set_rotation(rot)
 
     @staticmethod
     def _add_cuboid(entity_name, transform_name="cuboid"):
@@ -433,9 +431,9 @@ class FixRotation:
         max_obj = obj.get_mesh().get_max_aabb_corner()
         centroid_obj = obj.get_mesh().get_aabb_center()
         dimensions_dict = {
-            'width': max_obj[0] - min_obj[0],
-            'height': max_obj[1] - min_obj[1],
-            'length': max_obj[2] - min_obj[2]
+            'x': max_obj[0] - min_obj[0],
+            'y': max_obj[1] - min_obj[1],
+            'z': max_obj[2] - min_obj[2]
         }
         cuboid1 = [
             vec3(max_obj[0], max_obj[1], max_obj[2]),
@@ -450,9 +448,9 @@ class FixRotation:
         ]
 
         cuboid2 = [
-            cuboid1[2], cuboid1[0], cuboid1[3],
-            cuboid1[5], cuboid1[4], cuboid1[1],
-            cuboid1[6], cuboid1[7], cuboid1[-1],
+            cuboid1[2], cuboid1[4], cuboid1[1],
+            cuboid1[0], cuboid1[5], cuboid1[7],
+            cuboid1[6], cuboid1[3], cuboid1[-1],
             vec3(centroid_obj[0], centroid_obj[1], centroid_obj[2])
         ]
 

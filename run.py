@@ -8,12 +8,12 @@ import os
 import random
 
 
-def handle(executable, root_path, save_path, obj_per_img, jobs):
-    total_job_count = len(jobs)
+def handle(executable, root_path, save_path, obj_per_img, models_str, __jobs):
+    total_job_count = len(__jobs)
     base_path = os.path.dirname(os.path.abspath(__file__))
     n = 20
     done_job_count = 0
-    sub_groups = [jobs[i:i + n] for i in range(0, len(jobs), n)]
+    sub_groups = [__jobs[i:i + n] for i in range(0, len(__jobs), n)]
     for sub_jobs in sub_groups:
         print("%d request to run a new subprocess [%d/%d]" % (os.getpid(), done_job_count, total_job_count))
         subprocess.run((
@@ -25,6 +25,8 @@ def handle(executable, root_path, save_path, obj_per_img, jobs):
             root_path,
             "--save",
             save_path,
+            "--models",
+            models_str,
             "--jobs",
             ",".join(sub_jobs)
         ), check=True)
@@ -40,6 +42,7 @@ def main():
     parser.add_argument('--dataset', default="train", dest="dataset", type=str)
     parser.add_argument('--start', default=0, dest="start", type=int)
     parser.add_argument('--end', required=True, dest="end", type=int)
+    parser.add_argument('--models', default="", dest="models", type=str)
     args, _ = parser.parse_known_args()
 
     end_num = args.end
@@ -64,7 +67,7 @@ def main():
     job_groups = [jobs[i:i + n] for i in range(0, len(jobs), n)]
 
     with Pool(nb_process) as p:
-        func = partial(handle, executable, root_path, save_path, args.obj_per_img)
+        func = partial(handle, executable, root_path, save_path, args.obj_per_img, args.models)
         p.map(func, job_groups)
 
 
