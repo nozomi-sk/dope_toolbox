@@ -7,7 +7,7 @@ import threading
 import numpy
 import numpy as np
 import nvisii
-from numpy import deg2rad
+from numpy import deg2rad, rad2deg
 from squaternion import Quaternion
 import pybullet as p
 from nvisii import vec3
@@ -70,7 +70,7 @@ class MakeDataset:
             sub_dir_path = os.path.join(models_path, model_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
-            obj_paths = glob(os.path.join(sub_dir_path, "**/textured.obj"))
+            obj_paths = glob(os.path.join(sub_dir_path, "**/textured.obj"), recursive=True)
             if len(obj_paths) == 1:
                 print("found %s" % model_dir)
                 self.models[model_dir] = obj_paths[0]
@@ -185,11 +185,11 @@ class MakeDataset:
 
             pose = self.make_location()
             if obj_class_name not in self._model_rotations or self._model_rotations[obj_class_name] is None:
-                new_rot = (
+                new_rot = list(map(lambda x: rad2deg(x), (
                     random.uniform(-np.pi, np.pi),
                     random.uniform(-np.pi, np.pi),
                     random.uniform(-np.pi, np.pi),
-                )
+                )))
             else:
                 model_rotation = self._model_rotations[obj_class_name]
                 assert len(model_rotation) == 3
