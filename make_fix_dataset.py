@@ -54,8 +54,8 @@ class MakeDataset:
         models_path = os.path.join(self._base_path, "models")
         self._model_rotations = {
             # roll, pitch, yaw (in degrees)
-            "ycb_002_master_chef_can": ((0, 90), (0, 90), 0),
-            "ycb_004_sugar_box": ((0, 90), (0, 90), (0, 90)),
+            # "ycb_002_master_chef_can": ((0, 90), (0, 90), 0),
+            # "ycb_004_sugar_box": ((0, 90), (0, 90), (0, 90)),
         }
         model_dirs = os.listdir(models_path)
         if enabled_model_keywords is not None and len(enabled_model_keywords) > 0:
@@ -70,7 +70,7 @@ class MakeDataset:
             sub_dir_path = os.path.join(models_path, model_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
-            obj_paths = glob(os.path.join(sub_dir_path, "**/textured_fix.obj"))
+            obj_paths = glob(os.path.join(sub_dir_path, "**/textured.obj"))
             if len(obj_paths) == 1:
                 print("found %s" % model_dir)
                 self.models[model_dir] = obj_paths[0]
